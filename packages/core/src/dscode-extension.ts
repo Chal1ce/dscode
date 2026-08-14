@@ -42,6 +42,11 @@ import {
   summarizeValue,
   usageFromPiUsage,
 } from "./observability.js";
+import {
+  fingerprintRequestPrefix,
+  prefixDiagnosticAttributes,
+  PrefixFingerprintTracker,
+} from "./prefix-fingerprint.js";
 import { applyWorkspacePatch, type ApplyPatchResult } from "./patch.js";
 import {
   formatPlanForExecution,
@@ -160,6 +165,7 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
       let lastOfferedPlanRevision = 0;
       const access = new SessionAccessController(options.sandbox, options.network);
       const trace = new AgentRuntimeTrace();
+      const prefixTracker = new PrefixFingerprintTracker();
       const fixturePath = process.env.DSCODE_FIXTURE_PATH?.trim();
       const fixture = fixturePath ? readAgentFixtureFileSync(fixturePath) : undefined;
       const fixtureReplay = fixture ? new AgentFixtureReplay(fixture) : undefined;
@@ -254,16 +260,22 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
       pi.on("before_provider_request", (event, ctx) => {
         const spanId = nextTraceSpan("model");
         pendingModelSpans.push(spanId);
+        const shouldOptimize =
+          ctx.model?.provider === "deepseek" && options.transport === "responses";
+        const payload = shouldOptimize
+          ? optimizeDeepSeekResponsesPayload(event.payload, { webSearch: options.webSearch })
+          : event.payload;
+        const prefixDiagnostic = prefixTracker.observe(fingerprintRequestPrefix(payload));
         trace.record({
           type: "model_request",
           spanId,
           status: "started",
           provider: ctx.model?.provider ?? options.providerId,
           model: ctx.model?.id ?? options.modelId,
-          input: summarizeValue(event.payload),
+          input: summarizeValue(payload),
+          attributes: prefixDiagnosticAttributes(prefixDiagnostic),
         });
-        if (ctx.model?.provider !== "deepseek" || options.transport !== "responses") return;
-        return optimizeDeepSeekResponsesPayload(event.payload, { webSearch: options.webSearch });
+        if (shouldOptimize) return payload;
       });
 
       pi.on("after_provider_response", (event, ctx) => {
@@ -353,6 +365,7 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
         lastAgentFailed = false;
         traceErrorRecorded = false;
         pendingModelSpans.length = 0;
+        prefixTracker.reset();
         const traceId = trace.startRun({
           sessionId: ctx.sessionManager.getSessionId(),
           provider: options.providerId,

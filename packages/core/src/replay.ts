@@ -16,6 +16,20 @@ export interface TraceUsageSummary {
   cost: number;
 }
 
+export interface TracePrefixObservation {
+  requestIndex: number;
+  prefixHash: string;
+  change: string;
+  cacheReadTokens: number;
+}
+
+export interface TracePrefixSummary {
+  requests: number;
+  uniqueHashes: number;
+  changes: Record<string, number>;
+  observations: TracePrefixObservation[];
+}
+
 export interface TraceCounts {
   runs: number;
   turns: number;
@@ -40,6 +54,7 @@ export interface TraceReplayReport {
   durationMs: number;
   counts: TraceCounts;
   usage: TraceUsageSummary;
+  prefix: TracePrefixSummary;
   spans: {
     total: number;
     closed: number;
@@ -138,6 +153,10 @@ export function summarizeTrace(
   const toolCalls = new Set<string>();
   const toolResults = new Set<string>();
   const toolNames: string[] = [];
+  const prefixBySpan = new Map<string, Omit<TracePrefixObservation, "cacheReadTokens">>();
+  const prefixHashes = new Set<string>();
+  const prefixChanges: Record<string, number> = {};
+  const prefixObservations: TracePrefixObservation[] = [];
   const runStarts = new Set<string>();
   const runEnds = new Set<string>();
   let firstTimestamp: number | undefined;
@@ -164,12 +183,29 @@ export function summarizeTrace(
         break;
       case "model_request":
         counts.modelRequests += 1;
+        {
+          const prefix = readPrefixAttributes(event.attributes);
+          if (prefix) {
+            prefixBySpan.set(event.spanId, prefix);
+            prefixHashes.add(prefix.prefixHash);
+            prefixChanges[prefix.change] = (prefixChanges[prefix.change] ?? 0) + 1;
+          }
+        }
         break;
       case "provider_response":
         counts.providerResponses += 1;
         break;
       case "model_response":
         counts.modelResponses += 1;
+        {
+          const prefix = prefixBySpan.get(event.spanId);
+          if (prefix) {
+            prefixObservations.push({
+              ...prefix,
+              cacheReadTokens: event.usage?.cacheRead ?? 0,
+            });
+          }
+        }
         break;
       case "tool_call":
         counts.toolCalls += 1;
@@ -224,6 +260,12 @@ export function summarizeTrace(
         : Math.max(0, lastTimestamp - firstTimestamp),
     counts,
     usage,
+    prefix: {
+      requests: prefixBySpan.size,
+      uniqueHashes: prefixHashes.size,
+      changes: prefixChanges,
+      observations: prefixObservations,
+    },
     spans: { total: starts.size + [...closed].filter((spanId) => !starts.has(spanId)).length, closed: closed.size, unclosed },
     unmatchedToolCalls,
     toolNames,
@@ -245,7 +287,12 @@ export function compareTraceReports(
     toolFailures: candidate.counts.toolFailures - baseline.counts.toolFailures,
     errors: candidate.counts.errors - baseline.counts.errors,
     totalTokens: candidate.usage.totalTokens - baseline.usage.totalTokens,
+    cacheReadTokens: candidate.usage.cacheReadTokens - baseline.usage.cacheReadTokens,
     cost: candidate.usage.cost - baseline.usage.cost,
+    prefixRequests: candidate.prefix.requests - baseline.prefix.requests,
+    prefixChanges:
+      Object.values(candidate.prefix.changes).reduce((sum, count) => sum + count, 0) -
+      Object.values(baseline.prefix.changes).reduce((sum, count) => sum + count, 0),
   };
   const differences = Object.entries(deltas)
     .filter(([, value]) => value !== 0)
@@ -269,6 +316,12 @@ export function formatReplayReport(report: TraceReplayReport, json = false): str
     `models      ${report.counts.modelRequests} request(s), ${report.counts.modelResponses} response(s)`,
     `tools       ${report.counts.toolCalls} call(s), ${report.counts.toolFailures} failure(s)`,
     `usage       ${report.usage.totalTokens} tokens · $${report.usage.cost.toFixed(4)}`,
+    ...(report.prefix.requests
+      ? [
+          `prefix      ${report.prefix.requests} request(s), ${report.prefix.uniqueHashes} fingerprint(s) · ${report.usage.cacheReadTokens} cache read`,
+          `prefix diff ${formatPrefixChanges(report.prefix.changes)}`,
+        ]
+      : []),
     `spans       ${report.spans.closed}/${report.spans.total} closed`,
     ...(report.violations.length ? ["violations  ", ...report.violations.map((value) => `  ${value}`)] : []),
   ].join("\n");
@@ -300,4 +353,22 @@ function addUsage(summary: TraceUsageSummary, usage: AgentTraceUsage | undefined
 
 function formatDelta(value: number): string {
   return Number.isInteger(value) ? (value > 0 ? `+${value}` : String(value)) : `${value > 0 ? "+" : ""}${value.toFixed(4)}`;
+}
+
+function readPrefixAttributes(
+  attributes: Record<string, string | number | boolean> | undefined,
+): Omit<TracePrefixObservation, "cacheReadTokens"> | undefined {
+  if (!attributes || attributes.prefixSchema !== 1) return undefined;
+  if (typeof attributes.prefixRequestIndex !== "number") return undefined;
+  if (typeof attributes.prefixHash !== "string") return undefined;
+  return {
+    requestIndex: attributes.prefixRequestIndex,
+    prefixHash: attributes.prefixHash,
+    change: typeof attributes.prefixChange === "string" ? attributes.prefixChange : "unknown",
+  };
+}
+
+function formatPrefixChanges(changes: Record<string, number>): string {
+  const entries = Object.entries(changes);
+  return entries.length > 0 ? entries.map(([change, count]) => `${change}=${count}`).join(", ") : "none";
 }

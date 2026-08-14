@@ -123,9 +123,23 @@ export {
   summarizeTrace,
   type TraceComparison,
   type TraceCounts,
+  type TracePrefixObservation,
+  type TracePrefixSummary,
   type TraceReplayReport,
   type TraceUsageSummary,
 } from "./replay.js";
+export {
+  PREFIX_FINGERPRINT_SCHEMA_VERSION,
+  PREFIX_SEGMENTS,
+  PrefixFingerprintTracker,
+  fingerprintRequestPrefix,
+  prefixDiagnosticAttributes,
+  type PrefixChange,
+  type PrefixDiagnostic,
+  type PrefixSegment,
+  type PrefixSegmentFingerprint,
+  type RequestPrefixFingerprint,
+} from "./prefix-fingerprint.js";
 export {
   evaluateReplay,
   evaluateTrace,

@@ -39,6 +39,7 @@ describe("parseRuntimeArgs", () => {
       providerId: "deepseek",
       modelId: "deepseek-v4-flash",
       transport: "responses",
+      prefixCacheBackend: "native",
       harness: "minimal",
       permission: "auto",
       sandbox: "workspace-write",
@@ -135,6 +136,18 @@ describe("parseRuntimeArgs", () => {
       expect.arrayContaining(["--thinking", "high", "--mode", "json", "--continue"]),
     );
     expect(parsed.piArgs).not.toContain("--tools");
+  });
+
+  it("selects an explicit prefix cache backend and rejects unknown backends", () => {
+    expect(parseRuntimeArgs(["--prefix-cache-backend", "vllm"]).options.prefixCacheBackend).toBe(
+      "vllm",
+    );
+    expect(parseRuntimeArgs(["--prefix-cache-backend=sglang"]).options.prefixCacheBackend).toBe(
+      "sglang",
+    );
+    expect(() => parseRuntimeArgs(["--prefix-cache-backend", "unknown"])).toThrow(
+      "Invalid option",
+    );
   });
 
   it("keeps an explicit tool selection in DSCode so late MCP tools can be registered", () => {

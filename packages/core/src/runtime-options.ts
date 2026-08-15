@@ -23,6 +23,10 @@ import {
   SUPPORTED_PROVIDER_IDS,
   type SupportedProviderId,
 } from "./providers.js";
+import {
+  prefixCacheBackendSchema,
+  type PrefixCacheBackend,
+} from "./prefix-cache.js";
 
 export const sandboxModeSchema = z.enum(["read-only", "workspace-write", "danger-full-access"]);
 export type SandboxMode = z.infer<typeof sandboxModeSchema>;
@@ -38,6 +42,7 @@ export interface DSCodeRuntimeOptions {
   sandbox: SandboxMode;
   network: boolean;
   webSearch: boolean;
+  prefixCacheBackend?: PrefixCacheBackend;
   activeTools: string[];
   toolsExplicit: boolean;
   personalizationFile?: string;
@@ -74,6 +79,7 @@ export function parseRuntimeArgs(argv: string[]): ParsedRuntimeArgs {
   let sandbox = sandboxModeSchema.parse(process.env.DSCODE_SANDBOX ?? "workspace-write");
   let network = false;
   let webSearch = false;
+  let prefixCacheBackend: PrefixCacheBackend = "native";
   let activeTools: string[] | undefined;
   let toolsExplicit = false;
   const personalizationFile = process.env.DSCODE_PERSONALIZATION_FILE?.trim();
@@ -113,6 +119,8 @@ export function parseRuntimeArgs(argv: string[]): ParsedRuntimeArgs {
       network = true;
     } else if (flag === "--web") {
       webSearch = true;
+    } else if (flag === "--prefix-cache-backend") {
+      prefixCacheBackend = prefixCacheBackendSchema.parse(takeValue());
     } else if (flag === "--yes" || flag === "-y") {
       permission = "full";
       yolo = true;
@@ -181,6 +189,7 @@ export function parseRuntimeArgs(argv: string[]): ParsedRuntimeArgs {
       sandbox,
       network,
       webSearch,
+      prefixCacheBackend,
       activeTools,
       toolsExplicit,
       ...(personalizationFile ? { personalizationFile: path.resolve(personalizationFile) } : {}),
@@ -235,6 +244,7 @@ DSCode options:
   --sandbox <mode>                 read-only|workspace-write|danger-full-access
   --network                        Pre-authorize command network access for this run
   --web                            Enable DeepSeek server-side web search
+  --prefix-cache-backend <id>      Prefix cache adapter: native|vllm|sglang (default: native)
   --record-fixture <file>          Explicitly capture assistant responses for offline replay
   -y, --yes                        YOLO: trust project, skip approvals, allow host + network
 

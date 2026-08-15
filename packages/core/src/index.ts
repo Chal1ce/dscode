@@ -90,6 +90,16 @@ export {
   type SandboxMode,
 } from "./runtime-options.js";
 export {
+  createPrefixCacheAdapter,
+  extractPrefixCacheUsage,
+  prefixCacheBackendSchema,
+  type PrefixCacheAdapter,
+  type PrefixCacheAdapterOptions,
+  type PrefixCacheBackend,
+  type PrefixCacheRequestContext,
+  type PrefixCacheUsage,
+} from "./prefix-cache.js";
+export {
   PERSONALIZATION_TONE_IDS,
   buildPersonalizationPrompt,
   composePersonalizedSystemPrompt,

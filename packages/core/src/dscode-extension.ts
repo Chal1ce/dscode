@@ -30,6 +30,7 @@ import { registerLocalImageInput } from "./image-input.js";
 import { partitionSessionFile } from "./home.js";
 import { ManagedProcessRegistry, type ManagedProcessResult } from "./managed-process.js";
 import { MCPManager } from "./mcp.js";
+import { createPrefixCacheAdapter } from "./prefix-cache.js";
 import {
   AgentFixtureRecorder,
   AgentFixtureReplay,
@@ -178,6 +179,7 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
       let lastOfferedPlanRevision = 0;
       const access = new SessionAccessController(options.sandbox, options.network);
       const trace = new AgentRuntimeTrace();
+      const prefixCache = createPrefixCacheAdapter(options.prefixCacheBackend ?? "native");
       const prefixTracker = new PrefixFingerprintTracker();
       const fixturePath = process.env.DSCODE_FIXTURE_PATH?.trim();
       const fixture = fixturePath ? readAgentFixtureFileSync(fixturePath) : undefined;
@@ -301,14 +303,19 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
       pi.on("before_provider_request", (event, ctx) => {
         const spanId = nextTraceSpan("model");
         pendingModelSpans.push(spanId);
-        const shouldOptimize =
-          ctx.model?.provider === "deepseek" && options.transport === "responses";
-        const payload = shouldOptimize
-          ? optimizeDeepSeekResponsesPayload(event.payload, { webSearch: options.webSearch })
-          : event.payload;
-        const prefixDiagnostic = prefixTracker.observe(fingerprintRequestPrefix(payload));
         const provider = ctx.model?.provider ?? options.providerId;
         const model = ctx.model?.id ?? options.modelId;
+        const shouldOptimize =
+          ctx.model?.provider === "deepseek" && options.transport === "responses";
+        const optimizedPayload = shouldOptimize
+          ? optimizeDeepSeekResponsesPayload(event.payload, { webSearch: options.webSearch })
+          : event.payload;
+        const payload = prefixCache.transformRequest(optimizedPayload, {
+          provider,
+          model,
+          api: ctx.model?.api,
+        });
+        const prefixDiagnostic = prefixTracker.observe(fingerprintRequestPrefix(payload));
         const requestHeaderKey = `${provider}\n${model}\n${prefixDiagnostic.fingerprint.headerHash}`;
         if (
           persistedRequestHeaderKey !== requestHeaderKey &&
@@ -327,9 +334,12 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
           provider,
           model,
           input: summarizeValue(payload),
-          attributes: prefixDiagnosticAttributes(prefixDiagnostic),
+          attributes: {
+            ...prefixDiagnosticAttributes(prefixDiagnostic),
+            ...prefixCache.diagnosticAttributes(),
+          },
         });
-        if (shouldOptimize) return payload;
+        if (payload !== event.payload) return payload;
       });
 
       pi.on("after_provider_response", (event, ctx) => {
@@ -362,7 +372,9 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
       });
 
       pi.on("session_start", async (_event, ctx) => {
-        trace.setSession(ctx.sessionManager.getSessionId());
+        const sessionId = ctx.sessionManager.getSessionId();
+        trace.setSession(sessionId);
+        prefixCache.setSession(sessionId);
         const branch = ctx.sessionManager.getBranch();
         dispatchStates.clear();
         recordPendingToolRecoveries(branch, "session_start");
@@ -401,6 +413,7 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
 
       pi.on("session_tree", (_event, ctx) => {
         const branch = ctx.sessionManager.getBranch();
+        prefixCache.setSession(ctx.sessionManager.getSessionId());
         dispatchStates.clear();
         recordPendingToolRecoveries(branch, "session_tree");
         persistedRequestHeaderKey = restoreRequestHeaderKey(branch);
@@ -431,6 +444,7 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
         lastAgentFailed = false;
         traceErrorRecorded = false;
         pendingModelSpans.length = 0;
+        prefixCache.setSession(ctx.sessionManager.getSessionId());
         prefixTracker.reset();
         const traceId = trace.startRun({
           sessionId: ctx.sessionManager.getSessionId(),
@@ -738,7 +752,10 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
             : undefined;
         const usage =
           "usage" in event.message && event.message.usage
-            ? usageFromPiUsage(event.message.usage)
+            ? {
+                ...usageFromPiUsage(event.message.usage),
+                ...prefixCache.extractCacheUsage(event.message.usage),
+              }
             : undefined;
         trace.record({
           type: "model_response",

@@ -43,6 +43,24 @@ describe("prefix cache adapters", () => {
     expect(unchanged).toBe(openAiRequest);
   });
 
+  it("best-effort closes an SGLang session with the same opaque id", async () => {
+    const adapter = createPrefixCacheAdapter("sglang", { runtimeId: "runtime-a" });
+    adapter.setSession("session-a");
+    const request = adapter.transformRequest(openAiRequest, openAiContext) as Record<string, unknown>;
+    let closedSession: string | undefined;
+
+    await adapter.closeSession(async (sessionId) => {
+      closedSession = sessionId;
+    });
+
+    expect(closedSession).toBe(request.session_id);
+    await expect(
+      adapter.closeSession(async () => {
+        throw new Error("server unavailable");
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   it("normalizes cache usage and safely ignores missing fields", () => {
     expect(
       extractPrefixCacheUsage({

@@ -21,6 +21,7 @@ export interface PrefixCacheAdapter {
   transformRequest(payload: unknown, context: PrefixCacheRequestContext): unknown;
   extractCacheUsage(usage: unknown): PrefixCacheUsage;
   diagnosticAttributes(): Record<string, string | number | boolean>;
+  closeSession(close: (sessionId: string) => Promise<void>): Promise<void>;
 }
 
 export interface PrefixCacheAdapterOptions {
@@ -84,6 +85,8 @@ abstract class BasePrefixCacheAdapter implements PrefixCacheAdapter {
     return extractPrefixCacheUsage(usage);
   }
 
+  async closeSession(_close: (sessionId: string) => Promise<void>): Promise<void> {}
+
   diagnosticAttributes(): Record<string, string | number | boolean> {
     return {
       prefixCacheBackend: this.backend,
@@ -137,6 +140,15 @@ class SglangPrefixCacheAdapter extends BasePrefixCacheAdapter {
       ...payload,
       session_id: opaqueToken("dscode-sglang", this.identity()),
     };
+  }
+
+  async closeSession(close: (sessionId: string) => Promise<void>): Promise<void> {
+    if (!this.sessionId) return;
+    try {
+      await close(opaqueToken("dscode-sglang", this.identity()));
+    } catch {
+      // Session cleanup is best-effort and must never block runtime shutdown.
+    }
   }
 }
 

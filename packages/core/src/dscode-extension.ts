@@ -432,6 +432,16 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
 
       pi.on("session_shutdown", async (_event, ctx) => {
         recordPendingToolRecoveries(ctx.sessionManager.getBranch(), "session_shutdown");
+        if (isOpenAICompatibleApi(ctx.model?.api)) {
+          await prefixCache.closeSession((sessionId) =>
+            closeSglangSession(
+              ctx,
+              ctx.model?.provider ?? options.providerId,
+              ctx.model?.baseUrl ?? options.baseUrl,
+              sessionId,
+            ),
+          );
+        }
         trace.shutdown("cancelled");
         await fixtureRecorder?.finish();
         await trace.flush();
@@ -1208,6 +1218,79 @@ function registerDeepSeekProvider(
               thinkingFormat: "deepseek",
             },
     })),
+  });
+}
+
+const SGLANG_CLOSE_SESSION_TIMEOUT_MS = 1_000;
+
+async function closeSglangSession(
+  ctx: ExtensionContext,
+  provider: string,
+  baseUrl: string,
+  sessionId: string,
+): Promise<void> {
+  const startedAt = Date.now();
+  const auth = await resolveWithTimeout(
+    ctx.modelRegistry.getProviderAuth(provider),
+    SGLANG_CLOSE_SESSION_TIMEOUT_MS,
+  );
+  const remainingTimeout = SGLANG_CLOSE_SESSION_TIMEOUT_MS - (Date.now() - startedAt);
+  if (remainingTimeout <= 0) return;
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  for (const [name, value] of Object.entries(auth?.auth.headers ?? {})) {
+    if (typeof value === "string") headers[name] = value;
+  }
+  if (
+    auth?.auth.apiKey &&
+    !Object.keys(headers).some((name) => name.toLowerCase() === "authorization")
+  ) {
+    headers.authorization = `Bearer ${auth.auth.apiKey}`;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), remainingTimeout);
+  const relayAbort = (): void => controller.abort();
+  ctx.signal?.addEventListener("abort", relayAbort, { once: true });
+  try {
+    const response = await fetch(sglangCloseSessionUrl(baseUrl), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ session_id: sessionId }),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`SGLang close_session returned HTTP ${response.status}`);
+  } finally {
+    clearTimeout(timeout);
+    ctx.signal?.removeEventListener("abort", relayAbort);
+  }
+}
+
+function sglangCloseSessionUrl(baseUrl: string): string {
+  const url = new URL(baseUrl);
+  const pathname = url.pathname.replace(/\/+$/, "");
+  const rootPath = pathname.endsWith("/v1") ? pathname.slice(0, -3) : pathname;
+  url.pathname = `${rootPath}/close_session`.replace(/\/+/g, "/");
+  return url.toString();
+}
+
+function isOpenAICompatibleApi(api: string | undefined): boolean {
+  return api === undefined || api === "openai-completions" || api === "openai-responses";
+}
+
+async function resolveWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return new Promise<T | undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), timeoutMs);
+    promise.then(
+      (value) => {
+        if (timer) clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        if (timer) clearTimeout(timer);
+        resolve(undefined);
+      },
+    );
   });
 }
 

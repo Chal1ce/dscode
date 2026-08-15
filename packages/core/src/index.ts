@@ -131,13 +131,20 @@ export {
 export {
   PREFIX_FINGERPRINT_SCHEMA_VERSION,
   PREFIX_SEGMENTS,
+  REQUEST_HEADER_SEGMENTS,
+  REQUEST_HEADER_SNAPSHOT_ENTRY,
+  REQUEST_HEADER_SNAPSHOT_SCHEMA_VERSION,
   PrefixFingerprintTracker,
+  createRequestHeaderSnapshot,
   fingerprintRequestPrefix,
   prefixDiagnosticAttributes,
   type PrefixChange,
   type PrefixDiagnostic,
   type PrefixSegment,
   type PrefixSegmentFingerprint,
+  type RequestHeaderChange,
+  type RequestHeaderSegment,
+  type RequestHeaderSnapshot,
   type RequestPrefixFingerprint,
 } from "./prefix-fingerprint.js";
 export {

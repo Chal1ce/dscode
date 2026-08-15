@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   PrefixFingerprintTracker,
+  createRequestHeaderSnapshot,
   fingerprintRequestPrefix,
   prefixDiagnosticAttributes,
 } from "../packages/core/src/prefix-fingerprint.js";
@@ -52,6 +53,47 @@ describe("request prefix fingerprint", () => {
     expect(historyChange.epoch).toBe(initial.epoch);
     expect(configChange.change).toBe("config");
     expect(configChange.epoch).toBeGreaterThan(historyChange.epoch);
+  });
+
+  it("creates a durable header observation without copying prompt or tool content", () => {
+    const tracker = new PrefixFingerprintTracker();
+    const diagnostic = tracker.observe(fingerprintRequestPrefix(baseRequest));
+    const snapshot = createRequestHeaderSnapshot(diagnostic, "deepseek", "deepseek-v4-flash");
+
+    expect(snapshot).toMatchObject({
+      schemaVersion: 1,
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      requestIndex: 1,
+      epoch: 1,
+      change: "initial",
+      headerHash: diagnostic.fingerprint.headerHash,
+    });
+    expect(snapshot.segments).toEqual({
+      system: diagnostic.fingerprint.segments.system,
+      tools: diagnostic.fingerprint.segments.tools,
+      config: diagnostic.fingerprint.segments.config,
+    });
+    expect(JSON.stringify(snapshot)).not.toContain("private prompt");
+    expect(JSON.stringify(snapshot)).not.toContain("read_file");
+  });
+
+  it("keeps the durable header identity stable for history-only changes", () => {
+    const tracker = new PrefixFingerprintTracker();
+    tracker.observe(fingerprintRequestPrefix(baseRequest));
+    const history = tracker.observe(
+      fingerprintRequestPrefix({
+        ...baseRequest,
+        input: [...baseRequest.input, { role: "assistant", content: "response" }],
+      }),
+    );
+
+    expect(history.fingerprint.headerHash).toBe(
+      fingerprintRequestPrefix(baseRequest).headerHash,
+    );
+    expect(() => createRequestHeaderSnapshot(history, "deepseek", "deepseek-v4-flash")).toThrow(
+      "header-changing request",
+    );
   });
 
   it("projects prefix attributes and cache usage through replay", () => {

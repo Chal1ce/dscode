@@ -43,9 +43,11 @@ import {
   usageFromPiUsage,
 } from "./observability.js";
 import {
+  createRequestHeaderSnapshot,
   fingerprintRequestPrefix,
   prefixDiagnosticAttributes,
   PrefixFingerprintTracker,
+  REQUEST_HEADER_SNAPSHOT_ENTRY,
 } from "./prefix-fingerprint.js";
 import { applyWorkspacePatch, type ApplyPatchResult } from "./patch.js";
 import {
@@ -175,6 +177,7 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
       const pendingModelSpans: string[] = [];
       const pendingCompactionSpans: string[] = [];
       let traceSequence = 0;
+      let persistedRequestHeaderKey: string | undefined;
       const effectiveAccess = (): EffectiveAccess => access.effective(permission);
       const nextTraceSpan = (kind: string): string => `${kind}:${++traceSequence}`;
 
@@ -266,12 +269,25 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
           ? optimizeDeepSeekResponsesPayload(event.payload, { webSearch: options.webSearch })
           : event.payload;
         const prefixDiagnostic = prefixTracker.observe(fingerprintRequestPrefix(payload));
+        const provider = ctx.model?.provider ?? options.providerId;
+        const model = ctx.model?.id ?? options.modelId;
+        const requestHeaderKey = `${provider}\n${model}\n${prefixDiagnostic.fingerprint.headerHash}`;
+        if (
+          persistedRequestHeaderKey !== requestHeaderKey &&
+          (prefixDiagnostic.requestIndex === 1 || prefixDiagnostic.changedSegments.some((segment) => segment !== "history"))
+        ) {
+          pi.appendEntry(
+            REQUEST_HEADER_SNAPSHOT_ENTRY,
+            createRequestHeaderSnapshot(prefixDiagnostic, provider, model),
+          );
+          persistedRequestHeaderKey = requestHeaderKey;
+        }
         trace.record({
           type: "model_request",
           spanId,
           status: "started",
-          provider: ctx.model?.provider ?? options.providerId,
-          model: ctx.model?.id ?? options.modelId,
+          provider,
+          model,
           input: summarizeValue(payload),
           attributes: prefixDiagnosticAttributes(prefixDiagnostic),
         });
@@ -309,6 +325,7 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
 
       pi.on("session_start", async (_event, ctx) => {
         trace.setSession(ctx.sessionManager.getSessionId());
+        persistedRequestHeaderKey = restoreRequestHeaderKey(ctx.sessionManager.getBranch());
         checkpoints.length = 0;
         undone.clear();
         projectCommands = await discoverProjectCommands(ctx.cwd);
@@ -339,6 +356,10 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
         toolsBeforePlan = undefined;
         applyPermissionTools();
         await queueSessionPartition(ctx);
+      });
+
+      pi.on("session_tree", (_event, ctx) => {
+        persistedRequestHeaderKey = restoreRequestHeaderKey(ctx.sessionManager.getBranch());
       });
 
       pi.on("session_info_changed", async (_event, ctx) => {
@@ -1454,6 +1475,20 @@ function restoreCheckpointState(
       undone.add(entry.data.checkpointId);
     }
   }
+}
+
+function restoreRequestHeaderKey(entries: readonly SessionEntry[]): string | undefined {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry?.type !== "custom" || entry.customType !== REQUEST_HEADER_SNAPSHOT_ENTRY) continue;
+    if (!isRecord(entry.data)) continue;
+    const provider = entry.data.provider;
+    const model = entry.data.model;
+    const headerHash = entry.data.headerHash;
+    if (typeof provider !== "string" || typeof model !== "string" || typeof headerHash !== "string") continue;
+    return `${provider}\n${model}\n${headerHash}`;
+  }
+  return undefined;
 }
 
 function isCheckpoint(value: unknown): value is PatchCheckpoint {

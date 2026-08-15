@@ -1,10 +1,15 @@
 import { createHash } from "node:crypto";
 
 export const PREFIX_FINGERPRINT_SCHEMA_VERSION = 1 as const;
+export const REQUEST_HEADER_SNAPSHOT_SCHEMA_VERSION = 1 as const;
+export const REQUEST_HEADER_SNAPSHOT_ENTRY = "dscode-request-header";
 
 export const PREFIX_SEGMENTS = ["system", "tools", "config", "history"] as const;
 export type PrefixSegment = (typeof PREFIX_SEGMENTS)[number];
 export type PrefixChange = "initial" | "none" | PrefixSegment;
+export const REQUEST_HEADER_SEGMENTS = ["system", "tools", "config"] as const;
+export type RequestHeaderSegment = (typeof REQUEST_HEADER_SEGMENTS)[number];
+export type RequestHeaderChange = "initial" | RequestHeaderSegment;
 
 export interface PrefixSegmentFingerprint {
   hash: string;
@@ -15,7 +20,20 @@ export interface PrefixSegmentFingerprint {
 export interface RequestPrefixFingerprint {
   schemaVersion: typeof PREFIX_FINGERPRINT_SCHEMA_VERSION;
   hash: string;
+  headerHash: string;
   segments: Record<PrefixSegment, PrefixSegmentFingerprint>;
+}
+
+/** Privacy-preserving request-header identity persisted in the session tree. */
+export interface RequestHeaderSnapshot {
+  schemaVersion: typeof REQUEST_HEADER_SNAPSHOT_SCHEMA_VERSION;
+  provider: string;
+  model: string;
+  requestIndex: number;
+  epoch: number;
+  change: RequestHeaderChange;
+  headerHash: string;
+  segments: Record<RequestHeaderSegment, PrefixSegmentFingerprint>;
 }
 
 export interface PrefixDiagnostic {
@@ -86,7 +104,38 @@ export function fingerprintRequestPrefix(payload: unknown): RequestPrefixFingerp
   const hash = digest(
     PREFIX_SEGMENTS.map((segment) => `${segment}:${segments[segment].hash}`).join("\n"),
   );
-  return { schemaVersion: PREFIX_FINGERPRINT_SCHEMA_VERSION, hash, segments };
+  const headerHash = digest(
+    REQUEST_HEADER_SEGMENTS.map((segment) => `${segment}:${segments[segment].hash}`).join("\n"),
+  );
+  return { schemaVersion: PREFIX_FINGERPRINT_SCHEMA_VERSION, hash, headerHash, segments };
+}
+
+/** Build a durable header observation without persisting prompt or schema content. */
+export function createRequestHeaderSnapshot(
+  diagnostic: PrefixDiagnostic,
+  provider: string,
+  model: string,
+): RequestHeaderSnapshot {
+  const change = diagnostic.requestIndex === 1
+    ? "initial"
+    : diagnostic.changedSegments.find(
+        (segment): segment is RequestHeaderSegment => segment !== "history",
+      );
+  if (change === undefined) {
+    throw new Error("request header snapshot requires an initial or header-changing request");
+  }
+  return {
+    schemaVersion: REQUEST_HEADER_SNAPSHOT_SCHEMA_VERSION,
+    provider,
+    model,
+    requestIndex: diagnostic.requestIndex,
+    epoch: diagnostic.epoch,
+    change,
+    headerHash: diagnostic.fingerprint.headerHash,
+    segments: Object.fromEntries(
+      REQUEST_HEADER_SEGMENTS.map((segment) => [segment, diagnostic.fingerprint.segments[segment]]),
+    ) as Record<RequestHeaderSegment, PrefixSegmentFingerprint>,
+  };
 }
 
 export function prefixDiagnosticAttributes(
@@ -97,6 +146,7 @@ export function prefixDiagnosticAttributes(
     prefixRequestIndex: diagnostic.requestIndex,
     prefixEpoch: diagnostic.epoch,
     prefixHash: diagnostic.fingerprint.hash,
+    prefixHeaderHash: diagnostic.fingerprint.headerHash,
     prefixChange: diagnostic.change,
     prefixChangedSegments: diagnostic.changedSegments.join(","),
     prefixSystemHash: diagnostic.fingerprint.segments.system.hash,

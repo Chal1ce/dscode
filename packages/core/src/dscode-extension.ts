@@ -74,6 +74,17 @@ import {
   renderToolCall,
   type ToolPresentationContext,
 } from "./tool-ui.js";
+import {
+  createToolDispatchMarker,
+  createToolRecoveryMarker,
+  findPendingToolRecoveries,
+  restoreToolRecoveryMarkers,
+  toolRecoveryKey,
+  TOOL_DISPATCH_ENTRY,
+  TOOL_RECOVERY_ENTRY,
+  type ToolDispatchState,
+  type ToolRecoverySource,
+} from "./tool-recovery.js";
 import { createCodingTools } from "./tools.js";
 import { formatThinkingLabel, registerCodingTui } from "./tui-experience.js";
 import { Workspace } from "./workspace.js";
@@ -178,8 +189,35 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
       const pendingCompactionSpans: string[] = [];
       let traceSequence = 0;
       let persistedRequestHeaderKey: string | undefined;
+      const dispatchStates = new Map<string, ToolDispatchState>();
       const effectiveAccess = (): EffectiveAccess => access.effective(permission);
       const nextTraceSpan = (kind: string): string => `${kind}:${++traceSequence}`;
+
+      const recordToolDispatch = (
+        toolCallId: string,
+        toolName: string,
+        state: ToolDispatchState,
+      ): void => {
+        dispatchStates.set(toolCallId, state);
+        pi.appendEntry(TOOL_DISPATCH_ENTRY, createToolDispatchMarker(toolCallId, toolName, state));
+      };
+
+      const recordPendingToolRecoveries = (
+        entries: readonly SessionEntry[],
+        source: ToolRecoverySource,
+      ): void => {
+        const existing = new Set(
+          restoreToolRecoveryMarkers(entries).map((marker) =>
+            toolRecoveryKey(marker.toolCallId, marker.classification),
+          ),
+        );
+        for (const pending of findPendingToolRecoveries(entries, source)) {
+          const key = toolRecoveryKey(pending.toolCallId, pending.classification);
+          if (existing.has(key)) continue;
+          pi.appendEntry(TOOL_RECOVERY_ENTRY, createToolRecoveryMarker(pending, source));
+          existing.add(key);
+        }
+      };
 
       const queueSessionPartition = (ctx: ExtensionContext): Promise<void> => {
         const sessionFile = ctx.sessionManager.getSessionFile();
@@ -325,12 +363,15 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
 
       pi.on("session_start", async (_event, ctx) => {
         trace.setSession(ctx.sessionManager.getSessionId());
-        persistedRequestHeaderKey = restoreRequestHeaderKey(ctx.sessionManager.getBranch());
+        const branch = ctx.sessionManager.getBranch();
+        dispatchStates.clear();
+        recordPendingToolRecoveries(branch, "session_start");
+        persistedRequestHeaderKey = restoreRequestHeaderKey(branch);
         checkpoints.length = 0;
         undone.clear();
         projectCommands = await discoverProjectCommands(ctx.cwd);
-        restoreCheckpointState(ctx.sessionManager.getBranch(), checkpoints, undone);
-        planState = restorePlanState(ctx.sessionManager.getBranch());
+        restoreCheckpointState(branch, checkpoints, undone);
+        planState = restorePlanState(branch);
         lastOfferedPlanRevision = planState?.revision ?? 0;
         updateStatus(ctx);
         ctx.ui.setHiddenThinkingLabel(
@@ -359,7 +400,10 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
       });
 
       pi.on("session_tree", (_event, ctx) => {
-        persistedRequestHeaderKey = restoreRequestHeaderKey(ctx.sessionManager.getBranch());
+        const branch = ctx.sessionManager.getBranch();
+        dispatchStates.clear();
+        recordPendingToolRecoveries(branch, "session_tree");
+        persistedRequestHeaderKey = restoreRequestHeaderKey(branch);
       });
 
       pi.on("session_info_changed", async (_event, ctx) => {
@@ -374,6 +418,7 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
       });
 
       pi.on("session_shutdown", async (_event, ctx) => {
+        recordPendingToolRecoveries(ctx.sessionManager.getBranch(), "session_shutdown");
         trace.shutdown("cancelled");
         await fixtureRecorder?.finish();
         await trace.flush();
@@ -437,6 +482,7 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
           attributes: { inputKeyCount: Object.keys(event.input).length },
         });
         const blockTool = (reason: string, code = "policy") => {
+          recordToolDispatch(event.toolCallId, event.toolName, "blocked");
           trace.record({
             type: "approval",
             spanId: `approval:${event.toolCallId}`,
@@ -502,14 +548,21 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
         const needsApproval =
           permission === "ask" ||
           (permission === "auto" && (externalMcp || dangerousCommand));
-        if (!needsApproval) return;
-        if (!externalMcp && askWithoutPromptTools.has(event.toolName)) return;
+        if (!needsApproval) {
+          recordToolDispatch(event.toolCallId, event.toolName, "started");
+          return;
+        }
+        if (!externalMcp && askWithoutPromptTools.has(event.toolName)) {
+          recordToolDispatch(event.toolCallId, event.toolName, "started");
+          return;
+        }
         if (
           event.toolName === "write_stdin" &&
           isRecord(event.input) &&
           typeof event.input.chars !== "string" &&
           event.input.terminate !== true
         ) {
+          recordToolDispatch(event.toolCallId, event.toolName, "started");
           return;
         }
         if (
@@ -519,6 +572,7 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
           commandNeedsNetwork(command)
         ) {
           // The scoped network selector in exec_command is the approval UI for this action.
+          recordToolDispatch(event.toolCallId, event.toolName, "started");
           return;
         }
         if (!ctx.hasUI) {
@@ -552,9 +606,18 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
           if (!approved) return blockTool("Denied by user", "user_denied");
           recordApproval("approved");
         }
+        recordToolDispatch(event.toolCallId, event.toolName, "started");
       });
 
       pi.on("tool_result", (event) => {
+        if (dispatchStates.get(event.toolCallId) !== "blocked") {
+          recordToolDispatch(
+            event.toolCallId,
+            event.toolName,
+            event.isError ? "failed" : "completed",
+          );
+        }
+        dispatchStates.delete(event.toolCallId);
         trace.record({
           type: "tool_result",
           spanId: `tool:${event.toolCallId}`,
@@ -566,6 +629,12 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
           ...(event.usage ? { usage: usageFromPiUsage(event.usage) } : {}),
           ...(event.isError ? { error: { code: "tool", message: "tool execution failed" } } : {}),
         });
+      });
+
+      pi.on("tool_execution_end", (event) => {
+        if (dispatchStates.get(event.toolCallId) !== "started") return;
+        recordToolDispatch(event.toolCallId, event.toolName, "failed");
+        dispatchStates.delete(event.toolCallId);
       });
 
       pi.on("message_start", (event) => {

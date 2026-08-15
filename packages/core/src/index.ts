@@ -166,6 +166,12 @@ export {
   type EvaluationResult,
 } from "./evaluation.js";
 export {
+  contextPressureAttributes,
+  getContextPressureSnapshot,
+  type ContextPressure,
+  type ContextPressureSnapshot,
+} from "./context-pressure.js";
+export {
   AGENT_FIXTURE_KIND,
   AGENT_FIXTURE_SCHEMA_VERSION,
   AgentFixtureRecorder,

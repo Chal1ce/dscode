@@ -70,6 +70,10 @@ import { formatStatusReport } from "./status.js";
 import { normalizeDeepSeekBaseUrl, saveDeepSeekBaseUrl } from "./settings.js";
 import { registerSubagentTools } from "./subagents.js";
 import {
+  contextPressureAttributes,
+  getContextPressureSnapshot,
+} from "./context-pressure.js";
+import {
   oneLine,
   renderCollapsibleToolResult,
   renderToolCall,
@@ -694,9 +698,13 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
         });
       });
 
-      pi.on("session_before_compact", (event) => {
+      pi.on("session_before_compact", (event, ctx) => {
         const spanId = nextTraceSpan("compaction");
         pendingCompactionSpans.push(spanId);
+        const contextPressure = getContextPressureSnapshot(
+          event.preparation.tokensBefore,
+          ctx.model?.contextWindow ?? ctx.getContextUsage()?.contextWindow,
+        );
         trace.record({
           type: "compaction",
           spanId,
@@ -705,12 +713,17 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
             reason: event.reason,
             willRetry: event.willRetry,
             branchEntries: event.branchEntries.length,
+            ...contextPressureAttributes(contextPressure),
           },
         });
       });
 
-      pi.on("session_compact", (event) => {
+      pi.on("session_compact", (event, ctx) => {
         const spanId = pendingCompactionSpans.shift() ?? nextTraceSpan("compaction-result");
+        const contextPressure = getContextPressureSnapshot(
+          event.compactionEntry.tokensBefore,
+          ctx.model?.contextWindow ?? ctx.getContextUsage()?.contextWindow,
+        );
         trace.record({
           type: "compaction",
           spanId,
@@ -719,6 +732,7 @@ export function createDSCodeExtension(inputOptions: DSCodeRuntimeOptions): Inlin
             reason: event.reason,
             willRetry: event.willRetry,
             tokensBefore: event.compactionEntry.tokensBefore,
+            ...contextPressureAttributes(contextPressure),
           },
         });
       });
